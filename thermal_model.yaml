@@ -1,0 +1,216 @@
+# Thermal model sensors for hot tub preheat scheduling.
+# Computes heating rate and cooling rate from recorder history,
+# then derives preheat time estimates.
+
+sql:
+
+  # Heating rate: deg/min weighted toward recent events (last 30 days)
+  # Logic: find setpoint-raise events, measure time for water to follow,
+  #        compute deg/min per event, weight by recency (1/days_ago).
+  - name: "Hot Tub Heating Rate"
+    db_url: sqlite:////config/home-assistant_v2.db
+    scan_interval: 3600  # refresh hourly; automation below also triggers on demand
+    query: >
+      WITH
+      sp_meta AS (
+        SELECT metadata_id FROM states_meta
+        WHERE entity_id = 'number.tublemetry_hot_tub_setpoint'
+      ),
+      wt_meta AS (
+        SELECT metadata_id FROM states_meta
+        WHERE entity_id = 'sensor.tublemetry_hot_tub_temperature'
+      ),
+      sp_states AS (
+        SELECT CAST(state AS REAL) AS setpoint, last_updated_ts AS ts
+        FROM states
+        WHERE metadata_id = (SELECT metadata_id FROM sp_meta)
+          AND state NOT IN ('unknown','unavailable','')
+          AND last_updated_ts > (strftime('%s','now') - 30*86400)
+        ORDER BY last_updated_ts
+      ),
+      sp_raises AS (
+        SELECT setpoint AS target, ts AS raise_ts,
+          LAG(setpoint) OVER (ORDER BY ts) AS prev_setpoint
+        FROM sp_states
+      ),
+      raises AS (
+        SELECT target, raise_ts FROM sp_raises
+        WHERE target > prev_setpoint AND prev_setpoint IS NOT NULL
+      ),
+      events AS (
+        SELECT r.raise_ts, r.target,
+          (SELECT CAST(state AS REAL) FROM states
+           WHERE metadata_id = (SELECT metadata_id FROM wt_meta)
+             AND state NOT IN ('unknown','unavailable','')
+             AND last_updated_ts <= r.raise_ts
+           ORDER BY last_updated_ts DESC LIMIT 1) AS start_temp,
+          (SELECT last_updated_ts FROM states
+           WHERE metadata_id = (SELECT metadata_id FROM wt_meta)
+             AND state NOT IN ('unknown','unavailable','')
+             AND CAST(state AS REAL) >= r.target - 1.0
+             AND last_updated_ts > r.raise_ts
+             AND last_updated_ts < r.raise_ts + 14400
+           ORDER BY last_updated_ts ASC LIMIT 1) AS reached_ts
+        FROM raises r
+      ),
+      rated AS (
+        SELECT
+          (target - start_temp) / ((reached_ts - raise_ts) / 60.0) AS deg_per_min,
+          1.0 / (1.0 + (strftime('%s','now') - raise_ts) / 86400.0) AS weight
+        FROM events
+        WHERE reached_ts IS NOT NULL AND start_temp IS NOT NULL
+          AND target > start_temp + 0.5
+          AND (reached_ts - raise_ts) > 120
+          AND (reached_ts - raise_ts) < 14400
+      )
+      SELECT ROUND(SUM(deg_per_min * weight) / NULLIF(SUM(weight), 0), 4) AS value
+      FROM rated;
+    column: "value"
+    unit_of_measurement: "°F/min"
+
+  # Cooling rate: deg/hr lost when heater is off, weighted toward recent
+  # Logic: find heater-off windows >= 2h, measure temp drop start->end,
+  #        compute deg/hr, weight by recency.
+  - name: "Hot Tub Cooling Rate"
+    db_url: sqlite:////config/home-assistant_v2.db
+    scan_interval: 3600
+    query: >
+      WITH
+      wt_meta AS (
+        SELECT metadata_id FROM states_meta
+        WHERE entity_id = 'sensor.tublemetry_hot_tub_temperature'
+      ),
+      h_meta AS (
+        SELECT metadata_id FROM states_meta
+        WHERE entity_id = 'binary_sensor.tublemetry_hot_tub_heater'
+      ),
+      heater AS (
+        SELECT state, last_updated_ts AS ts,
+          LEAD(last_updated_ts) OVER (ORDER BY last_updated_ts) AS next_ts
+        FROM states
+        WHERE metadata_id = (SELECT metadata_id FROM h_meta)
+          AND state NOT IN ('unknown','unavailable','')
+          AND last_updated_ts > (strftime('%s','now') - 30*86400)
+        ORDER BY last_updated_ts
+      ),
+      off_windows AS (
+        SELECT ts AS off_start, next_ts AS off_end
+        FROM heater
+        WHERE state = 'off' AND next_ts IS NOT NULL
+          AND (next_ts - ts) >= 7200
+      ),
+      coolings AS (
+        SELECT w.off_start, w.off_end,
+          (SELECT CAST(state AS REAL) FROM states
+           WHERE metadata_id = (SELECT metadata_id FROM wt_meta)
+             AND state NOT IN ('unknown','unavailable','')
+             AND last_updated_ts >= w.off_start
+           ORDER BY last_updated_ts ASC LIMIT 1) AS temp_start,
+          (SELECT CAST(state AS REAL) FROM states
+           WHERE metadata_id = (SELECT metadata_id FROM wt_meta)
+             AND state NOT IN ('unknown','unavailable','')
+             AND last_updated_ts <= w.off_end
+           ORDER BY last_updated_ts DESC LIMIT 1) AS temp_end
+        FROM off_windows w
+      ),
+      rated AS (
+        SELECT
+          (temp_start - temp_end) / ((off_end - off_start) / 3600.0) AS deg_per_hr,
+          1.0 / (1.0 + (strftime('%s','now') - off_start) / 86400.0) AS weight
+        FROM coolings
+        WHERE temp_start IS NOT NULL AND temp_end IS NOT NULL
+          AND temp_start > temp_end AND (temp_start - temp_end) < 20
+      )
+      SELECT ROUND(SUM(deg_per_hr * weight) / NULLIF(SUM(weight), 0), 2) AS value
+      FROM rated;
+    column: "value"
+    unit_of_measurement: "°F/hr"
+
+template:
+  - sensor:
+      # Minutes to reach setpoint from current water temp
+      # Uses current heating rate estimate.
+      - name: "Hot Tub Preheat Minutes"
+        unit_of_measurement: "min"
+        state_class: measurement
+        icon: mdi:timer-outline
+        state: >
+          {% set rate = states('sensor.hot_tub_heating_rate') | float(0) %}
+          {% set current = states('sensor.tublemetry_hot_tub_temperature') | float(0) %}
+          {% set target = states('number.tublemetry_hot_tub_setpoint') | float(0) %}
+          {% if rate > 0 and target > current %}
+            {{ ((target - current) / rate) | round(0) | int }}
+          {% else %}
+            0
+          {% endif %}
+
+      # Human-readable preheat estimate
+      - name: "Hot Tub Preheat ETA"
+        icon: mdi:clock-outline
+        state: >
+          {% set mins = states('sensor.hot_tub_preheat_minutes') | int(0) %}
+          {% set current = states('sensor.tublemetry_hot_tub_temperature') | float(0) %}
+          {% set target = states('number.tublemetry_hot_tub_setpoint') | float(0) %}
+          {% set rate = states('sensor.hot_tub_heating_rate') | float(0) %}
+          {% if rate == 0 %}
+            No rate data yet
+          {% elif target <= current %}
+            Ready now
+          {% elif mins < 60 %}
+            ~{{ mins }} min
+          {% else %}
+            ~{{ (mins / 60) | round(1) }}h ({{ mins }} min)
+          {% endif %}
+
+      # Degrees lost per hour at current outdoor temp (informational)
+      - name: "Hot Tub Heat Loss Rate"
+        unit_of_measurement: "°F/hr"
+        state_class: measurement
+        icon: mdi:thermometer-minus
+        state: >
+          {{ states('sensor.hot_tub_cooling_rate') | float(0) | round(2) }}
+
+input_number:
+  hot_tub_heating_rate_snapshot:
+    name: "Hot Tub Heating Rate (snapshot)"
+    min: 0
+    max: 5
+    step: 0.0001
+    unit_of_measurement: "°F/min"
+    icon: mdi:thermometer-chevron-up
+
+  hot_tub_cooling_rate_snapshot:
+    name: "Hot Tub Cooling Rate (snapshot)"
+    min: 0
+    max: 10
+    step: 0.01
+    unit_of_measurement: "°F/hr"
+    icon: mdi:thermometer-chevron-down
+
+automation:
+  - alias: "Hot Tub Refresh Thermal Model"
+    description: >
+      Triggers the SQL sensors to recompute rates once per day and
+      snapshots values into input_numbers for persistence.
+    trigger:
+      - platform: time
+        at: "03:00:00"
+    action:
+      - action: homeassistant.update_entity
+        target:
+          entity_id:
+            - sensor.hot_tub_heating_rate
+            - sensor.hot_tub_cooling_rate
+      - delay: "00:00:10"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hot_tub_heating_rate_snapshot
+        data:
+          value: >
+            {{ states('sensor.hot_tub_heating_rate') | float(0) }}
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hot_tub_cooling_rate_snapshot
+        data:
+          value: >
+            {{ states('sensor.hot_tub_cooling_rate') | float(0) }}
