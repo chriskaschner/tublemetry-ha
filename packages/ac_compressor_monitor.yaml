@@ -7,13 +7,20 @@
 # thermal check instead of electrical:
 #
 #   FAULT = the ecobee has commanded the compressor (equipment_running contains
-#   'compCool') continuously for >= 20 min, but indoor temperature has NOT
-#   dropped >= 1 F and is still above setpoint.
+#   'compCool') continuously for >= 90 min, but indoor temperature has NOT
+#   dropped >= 0.3 F and is still above setpoint.
 #
-# A healthy 2-ton unit easily drops >1 F in 20 min, so a 20-min run with no drop
-# means it is not really cooling. Calibrated 2026-07-19: measured compressor step
-# ~2.79 kW but against a 5-11 kW noisy whole-home baseline -> electrical detection
-# is unreliable without a dedicated CT clamp (deferred), hence thermal-only.
+# Calibrated to the observed cooling rate ~1 F/hr (2026-07-20): a healthy unit
+# drops ~1.5 F in 90 min, so <0.3 F drop over 90 min means it is not really
+# cooling. (The original 1 F/20 min threshold false-alarmed on the normal slow
+# rate.) STOPGAP ONLY: room-temp detection is inherently slow and confounded by
+# outdoor heat gain (a working AC can hold temp flat on a very hot afternoon and
+# still trip this). The real fix is a SUPPLY-AIR (duct) temperature sensor --
+# supply drops ~15-20 F below return within ~1-2 min of the compressor running,
+# giving a fast, noise-immune signal. ESPHome DS18B20 probe recommended (TODO).
+# Electrical detection via whole-home Enphase was rejected: measured compressor
+# step ~2.79 kW but the baseline swings 5-11 kW, so it is unusable without a
+# dedicated CT clamp.
 #
 # Signal notes:
 # - equipment_running is the ecobee's raw equipment status ("fan",
@@ -52,16 +59,16 @@ automation:
   - alias: "AC Compressor Not Cooling"
     id: ac_compressor_not_cooling
     description: >
-      Alerts if the ecobee has commanded cooling for >=20 min but indoor temp
-      has not dropped >=1 F and is still above setpoint -- i.e. the compressor is
-      commanded but the space is not actually cooling.
+      Alerts if the ecobee has commanded cooling for >=90 min but indoor temp
+      has not dropped >=0.3 F and is still above setpoint -- i.e. the compressor
+      is commanded but the space is not actually cooling. Tuned to ~1 F/hr rate.
     mode: single
     trigger:
       - platform: state
         entity_id: binary_sensor.ac_cooling_commanded
         to: "on"
         for:
-          minutes: 20
+          minutes: 90
     condition:
       - condition: template
         value_template: >
@@ -70,7 +77,7 @@ automation:
           {% set start = states('sensor.ac_cooling_start_temp') | float(none) %}
           {{ cur is not none and sp is not none and start is not none
              and cur > sp
-             and (start - cur) < 1.0 }}
+             and (start - cur) < 0.3 }}
     action:
       - action: system_log.write
         data:
