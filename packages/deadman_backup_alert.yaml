@@ -35,7 +35,7 @@
 #   watchdog that only exists inside the system it watches is self-defeating.
 #
 # Alerts go to a persistent (in-app) notification and a phone push via
-# notify.mobile_app_chris_phone (same notify service the other packages use).
+# notify.mobile_app_chris_iphone (same notify service the other packages use).
 
 automation:
   - alias: Backup Dead-Man Alert
@@ -88,7 +88,7 @@ automation:
                     Last SUCCESSFUL backup:
                     {{ states('sensor.backup_last_successful_automatic_backup') }}.
                   notification_id: deadman_backup_failed
-              - action: notify.mobile_app_chris_phone
+              - action: notify.mobile_app_chris_iphone
                 data:
                   title: "HA backup FAILED"
                   message: >
@@ -130,7 +130,7 @@ automation:
                     Backups, the DS218+ SMB share (asleep/offline?), Google Drive
                     authorization (token expired?), and available disk space.
                   notification_id: deadman_backup_stale
-              - action: notify.mobile_app_chris_phone
+              - action: notify.mobile_app_chris_iphone
                 data:
                   title: "HA has no recent backup"
                   message: >
