@@ -161,6 +161,120 @@ script:
               Check the panel.
             {% endif %}
 
+  # --- Dashboard-facing wrappers -------------------------------------------
+  #
+  # These exist so a Lovelace card can trigger the SAME code path as the
+  # physical button -- guards, override flag, and confirm-before-notifying all
+  # inherited from hot_tub_apply_setpoint rather than reimplemented.
+  #
+  # WHY WRAPPERS INSTEAD OF CALLING THE SCRIPT FROM THE CARD
+  # Lovelace action data is not templated. A card calling hot_tub_apply_setpoint
+  # directly would have to hardcode `target: 102`, which silently ignores the
+  # seasonal sliders -- the exact bug the sliders were added to prevent. Each
+  # wrapper resolves its slider at run time, so dragging Max to 104 for winter
+  # changes what "Set to Hot" means with no dashboard edit.
+
+  hot_tub_set_hot:
+    alias: "Hot Tub: Set to Hot"
+    icon: mdi:fire
+    mode: restart
+    sequence:
+      - action: script.hot_tub_apply_setpoint
+        data:
+          target: "{{ states('input_number.hot_tub_max_setpoint') | int(102) }}"
+          label: "Max"
+          set_override: true
+
+  hot_tub_set_cold:
+    alias: "Hot Tub: Set to Cold"
+    icon: mdi:snowflake
+    mode: restart
+    sequence:
+      - action: script.hot_tub_apply_setpoint
+        data:
+          target: "{{ states('input_number.hot_tub_coast_setpoint') | int(90) }}"
+          label: "Coast"
+          set_override: true
+
+  # The long-press escape hatch, reachable from the app. Without this, an
+  # override raised from the dashboard can only be cleared by walking to the
+  # tub and long-pressing, or by waiting for the next boundary.
+  hot_tub_resume_schedule:
+    alias: "Hot Tub: Resume Schedule"
+    icon: mdi:calendar-clock
+    mode: restart
+    sequence:
+      - action: script.hot_tub_apply_setpoint
+        data:
+          target: "{{ states('sensor.hot_tub_expected_setpoint') | int(102) }}"
+          label: "Schedule"
+          set_override: false
+
+  # --- One-degree nudges ----------------------------------------------------
+  #
+  # These replace the "Hot Tub Temp Up/Down (Test)" buttons on the dashboard.
+  # Those fire ONE raw relay pulse (button_injector.cpp press_once -> TEST_PRESS),
+  # and on a Balboa panel the first press only wakes the display and reveals the
+  # setpoint without incrementing -- which is why they need pressing repeatedly.
+  # They also set known_setpoint_ = NAN, forcing a probe down-press at the next
+  # TOU boundary. Route through the closed loop instead, which is immune to the
+  # wake press (button_injector.cpp:308).
+  #
+  # Base is the PANEL's confirmed setpoint, not the commanded one, so a nudge
+  # after a failed injection moves from where the tub actually is. Falls back to
+  # the commanded value when the panel reading is unavailable.
+  #
+  # Refusing at the clamp is deliberate: hot_tub_apply_setpoint would accept a
+  # no-op target and the firmware would run the full retry ladder against zero
+  # required presses, latching last_command_result = failed (the known no-op
+  # bug). Better to say "already at maximum" than to fake a failure.
+
+  hot_tub_nudge_up:
+    alias: "Hot Tub: Temp Up 1F"
+    icon: mdi:thermometer-plus
+    mode: restart
+    sequence:
+      - variables:
+          base: >-
+            {{ states('sensor.tublemetry_hot_tub_detected_setpoint')
+               | int(states('number.tublemetry_hot_tub_setpoint') | int(102)) }}
+      - if: "{{ base + 1 > 104 }}"
+        then:
+          - action: notify.mobile_app_chris_iphone
+            data:
+              title: "Hot tub: already at maximum"
+              message: >-
+                The panel is at {{ base }}F, the highest the controller allows.
+          - stop: "at ceiling"
+      - action: script.hot_tub_apply_setpoint
+        data:
+          target: "{{ base + 1 }}"
+          label: "Temp Up"
+          set_override: true
+
+  hot_tub_nudge_down:
+    alias: "Hot Tub: Temp Down 1F"
+    icon: mdi:thermometer-minus
+    mode: restart
+    sequence:
+      - variables:
+          base: >-
+            {{ states('sensor.tublemetry_hot_tub_detected_setpoint')
+               | int(states('number.tublemetry_hot_tub_setpoint') | int(102)) }}
+      - if: "{{ base - 1 < 80 }}"
+        then:
+          - action: notify.mobile_app_chris_iphone
+            data:
+              title: "Hot tub: already at minimum"
+              message: >-
+                The panel is at {{ base }}F, the lowest the controller allows.
+          - stop: "at floor"
+      - action: script.hot_tub_apply_setpoint
+        data:
+          target: "{{ base - 1 }}"
+          label: "Temp Down"
+          set_override: true
+
 automation:
   - id: hot_tub_button_control
     alias: Hot Tub Button Control
