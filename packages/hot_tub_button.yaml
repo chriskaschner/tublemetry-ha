@@ -1,15 +1,39 @@
-# Hot Tub physical button control (SONOFF SNZB-01P via deCONZ)
+# Hot Tub physical button control (eWeLink SNZB-01P via ZHA)
 #
-# One physical button, three gestures, captured live from the device on
-# 2026-08-31 with scripts/capture_button_events.py (2 clean passes, no stray or
-# precursor events, so no debounce logic is needed):
+# MIGRATED FROM deCONZ TO ZHA 2026-09-11. The ConBee II was retired for the
+# freeze documented in ha/deconz_watchdog.yaml's header; the coordinator is now
+# a SONOFF ZBDongle-E running under ZHA. The gestures are identical, but the
+# event bus, the event name and the payload shape all changed:
 #
-#   deconz_event id=roundbutton event=1002  single press  -> Max setpoint
-#   deconz_event id=roundbutton event=1004  double press  -> Coast setpoint
-#   deconz_event id=roundbutton event=1003  long press    -> resume TOU schedule
+#   OLD  deconz_event  id=roundbutton  event=1002 / 1004 / 1003
+#   NEW  zha_event     device_ieee=... command=toggle / on / off
 #
-# NOTE 1003 is "long RELEASE". The device never emitted 1001 ("hold"), so a long
-# press fires exactly once, on release -- no repeat-while-held to defend against.
+# One physical button, three gestures, RECAPTURED live from the device on
+# 2026-09-11 with scripts/capture_button_events.py after re-pairing:
+#
+#   zha_event command=toggle  single press  -> Max setpoint    (5 observations)
+#   zha_event command=on      double press  -> Coast setpoint  (4 observations)
+#   zha_event command=off     long press    -> resume TOU      (4 observations)
+#
+# These are OBSERVED values. The ZHA command names are NOT semantic -- "on" does
+# not mean "turn on" here, it is simply the ZCL On/Off cluster command the
+# device happens to emit for a double press. Do not "fix" them to look sensible.
+#
+# MATCHED ON device_ieee, NOT device_id. The IEEE is burned into the radio and
+# survived the deCONZ -> ZHA migration unchanged (cc:36:bb:ff:fe:02:b9:df), so
+# it also survives any future re-pair. HA's `device_id` is a registry key that
+# is regenerated whenever the device is removed and re-added, which is exactly
+# what a coordinator migration does.
+#
+# The device also emits a `command=attribute_updated` event alongside every
+# gesture (the On/Off cluster attribute mirroring). Matching on the three
+# gesture commands excludes it naturally -- do not trigger on the cluster
+# attribute or every press fires twice.
+#
+# NOTE a long press that is not held long enough degrades to `toggle`, i.e. it
+# reads as a single press and applies Max instead of resuming the schedule.
+# Observed once during capture. Harmless (a second long press fixes it) but it
+# is the device's behavior, not a bug to chase.
 #
 # WHY AN OVERRIDE FLAG EXISTS
 # ---------------------------
@@ -289,22 +313,22 @@ automation:
 
     trigger:
       - platform: event
-        event_type: deconz_event
+        event_type: zha_event
         event_data:
-          id: roundbutton
-          event: 1002
+          device_ieee: "cc:36:bb:ff:fe:02:b9:df"
+          command: toggle
         id: single_press
       - platform: event
-        event_type: deconz_event
+        event_type: zha_event
         event_data:
-          id: roundbutton
-          event: 1004
+          device_ieee: "cc:36:bb:ff:fe:02:b9:df"
+          command: "on"
         id: double_press
       - platform: event
-        event_type: deconz_event
+        event_type: zha_event
         event_data:
-          id: roundbutton
-          event: 1003
+          device_ieee: "cc:36:bb:ff:fe:02:b9:df"
+          command: "off"
         id: long_press
 
     action:
