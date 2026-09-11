@@ -20,10 +20,21 @@
 # device happens to emit for a double press. Do not "fix" them to look sensible.
 #
 # MATCHED ON device_ieee, NOT device_id. The IEEE is burned into the radio and
-# survived the deCONZ -> ZHA migration unchanged (cc:36:bb:ff:fe:02:b9:df), so
-# it also survives any future re-pair. HA's `device_id` is a registry key that
-# is regenerated whenever the device is removed and re-added, which is exactly
-# what a coordinator migration does.
+# survived the deCONZ -> ZHA migration unchanged, so it also survives any future
+# re-pair. HA's `device_id` is a registry key that is regenerated whenever the
+# device is removed and re-added, which is exactly what a coordinator migration
+# does.
+#
+# THE IEEE IS A !secret, AND THAT IS LOAD-BEARING. This file is deployed to the
+# PUBLIC tublemetry-ha repo, so the hardware address lives in /config/secrets.yaml
+# instead:
+#
+#     hot_tub_button_ieee: "cc:36:..:..:..:..:..:.."
+#
+# If that key is missing, HA fails to load this ENTIRE package -- which takes
+# script.hot_tub_apply_setpoint and every dashboard button down with it, not just
+# the physical button. Add the secret BEFORE deploying this file, and never
+# inline a literal address here to "just make it work".
 #
 # The device also emits a `command=attribute_updated` event alongside every
 # gesture (the On/Off cluster attribute mirroring). Matching on the three
@@ -315,19 +326,19 @@ automation:
       - platform: event
         event_type: zha_event
         event_data:
-          device_ieee: "cc:36:bb:ff:fe:02:b9:df"
+          device_ieee: !secret hot_tub_button_ieee
           command: toggle
         id: single_press
       - platform: event
         event_type: zha_event
         event_data:
-          device_ieee: "cc:36:bb:ff:fe:02:b9:df"
+          device_ieee: !secret hot_tub_button_ieee
           command: "on"
         id: double_press
       - platform: event
         event_type: zha_event
         event_data:
-          device_ieee: "cc:36:bb:ff:fe:02:b9:df"
+          device_ieee: !secret hot_tub_button_ieee
           command: "off"
         id: long_press
 
