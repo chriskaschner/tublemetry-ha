@@ -1,0 +1,100 @@
+# Hot Tub mode indicator -- ThirdReality Zigbee Nightlight (ZHA), light.nightlight
+#
+# Paired 2026-09-21. The device also exposes a motion sensor and an
+# illuminance sensor (binary_sensor.nightlight_motion,
+# sensor.nightlight_illuminance) -- neither is used here; this package only
+# drives the light itself. supported_color_modes on light.nightlight are
+# color_temp and xy (checked on the live entity after pairing, not assumed),
+# so full RGB is available via the standard rgb_color service data even though
+# the device reports xy natively -- HA does the conversion.
+#
+# WHAT "HEAT" / "COLD" MEANS HERE (decided 2026-09-21)
+# -----------------------------------------------------
+# This mirrors the TOU schedule TIER (Max vs Coast -- the same distinction as
+# the "Set to Hot" / "Set to Cold" dashboard buttons in hot_tub_button.yaml),
+# NOT binary_sensor.tublemetry_hot_tub_heater. The heater relay cycles on/off
+# to hold temperature in BOTH tiers, so wiring the light to it directly would
+# flicker constantly instead of showing a stable mode.
+#
+# The tier is read off number.tublemetry_hot_tub_setpoint (what was actually
+# COMMANDED), not sensor.hot_tub_expected_setpoint (what the schedule wants).
+# Using the commanded value means a button press or nudge updates the light
+# immediately, and it stays correct during a manual override, when the two can
+# disagree. The classification is "above or below the midpoint of the two
+# seasonal sliders" rather than an exact match against Max, so the evening
+# preheat tier (max - 2, see templates.yaml) still reads as "heat", which
+# matches what it actually is.
+#
+# sensor.hot_tub_mode is a plain string sensor (heat / cold / offline) rather
+# than a binary_sensor so the dashboard can show it directly. "offline" -- not
+# "unknown" -- is deliberate: HA already overloads unknown/unavailable for
+# "no data", and a color that quietly goes stale would be worse than one that
+# visibly turns off. The light goes off, not to a leftover color, whenever the
+# tub controller is unreachable or a setpoint/slider value is missing.
+#
+# Deploy: tublemetry-ha repo packages/ (Git-pull synced), like the other packages.
+
+template:
+  - sensor:
+      - name: "Hot Tub Mode"
+        unique_id: hot_tub_mode
+        icon: mdi:thermometer-auto
+        state: >-
+          {% set unavail = ['unknown', 'unavailable'] %}
+          {% set api_ok = is_state('binary_sensor.tublemetry_hot_tub_api_status', 'on') %}
+          {% set target = states('number.tublemetry_hot_tub_setpoint') %}
+          {% set maxsp = states('input_number.hot_tub_max_setpoint') %}
+          {% set coast = states('input_number.hot_tub_coast_setpoint') %}
+          {% if not api_ok or target in unavail or maxsp in unavail or coast in unavail %}
+          offline
+          {% else %}
+          {% set mid = (maxsp | float + coast | float) / 2 %}
+          {{ 'heat' if target | float >= mid else 'cold' }}
+          {% endif %}
+
+automation:
+  - id: hot_tub_mode_light
+    alias: Hot Tub Mode Light
+    description: >
+      Drives the Nightlight as an at-a-glance indicator of the hot tub's
+      current TOU tier: warm red for Max ("heat"), blue for Coast ("cold").
+      Off whenever sensor.hot_tub_mode reports "offline", so a stale reading
+      is never shown as a real color.
+    mode: single
+
+    trigger:
+      - platform: state
+        entity_id: sensor.hot_tub_mode
+      # Re-apply after the light itself comes back (firmware update, Zigbee
+      # drop, power cycle) -- its physical color does not remember what mode
+      # was active while it was gone.
+      - platform: state
+        entity_id: light.nightlight
+        from: "unavailable"
+      - platform: homeassistant
+        event: start
+
+    action:
+      - variables:
+          mode: "{{ states('sensor.hot_tub_mode') }}"
+      - choose:
+          - conditions: "{{ mode == 'heat' }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: light.nightlight
+                data:
+                  rgb_color: [255, 40, 0]
+                  brightness_pct: 40
+          - conditions: "{{ mode == 'cold' }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: light.nightlight
+                data:
+                  rgb_color: [20, 90, 255]
+                  brightness_pct: 40
+        default:
+          - action: light.turn_off
+            target:
+              entity_id: light.nightlight
