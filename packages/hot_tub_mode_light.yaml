@@ -32,6 +32,13 @@
 # visibly turns off. The light goes off, not to a leftover color, whenever the
 # tub controller is unreachable or a setpoint/slider value is missing.
 #
+# BRIGHTNESS IS SET HERE, NOT ON THE HA DASHBOARD SLIDER. The automation
+# re-asserts brightness_pct on every trigger (a tier change or an HA restart),
+# so a manual brightness change made in the UI holds only until the next one
+# of those fires, then silently reverts -- which is exactly the "fiddling with
+# sliders didn't work" symptom observed 2026-09-22. Change the value below
+# instead.
+#
 # Deploy: tublemetry-ha repo packages/ (Git-pull synced), like the other packages.
 
 template:
@@ -85,7 +92,7 @@ automation:
                   entity_id: light.nightlight
                 data:
                   rgb_color: [255, 40, 0]
-                  brightness_pct: 40
+                  brightness_pct: 1
           - conditions: "{{ mode == 'cold' }}"
             sequence:
               - action: light.turn_on
@@ -93,7 +100,7 @@ automation:
                   entity_id: light.nightlight
                 data:
                   rgb_color: [20, 90, 255]
-                  brightness_pct: 40
+                  brightness_pct: 1
         default:
           - action: light.turn_off
             target:
